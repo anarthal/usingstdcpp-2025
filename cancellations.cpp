@@ -1,7 +1,26 @@
+//
+// Copyright (c) 2019-2024 Ruben Perez Hidalgo (rubenperez038 at gmail dot com)
+//
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//
 
-#include <boost/mysql/connection_pool.hpp>
-#include <boost/mysql/results.hpp>
-#include <boost/mysql/with_params.hpp>
+/**
+ * Sample code for the talk
+ * "Cancellations in Asio: a tale of coroutines and timeouts",
+ * proposed for using std::cpp 2025. This is still a work in progress.
+ *
+ * This program implements a simplistic HTTP server that accesses
+ * a SQL database when handling client requests.
+ * Recognizes requests with the form GET /employee/{id},
+ * where id is an integral number identifying an employee.
+ * It returns a plaintext body with the employee's last name.
+ *
+ * The main point of this server is learning about
+ * per-operation cancellation in Asio.
+ * Boost.Beast and Boost.MySQL are used to make
+ * the example more realistic.
+ */
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancel_after.hpp>
@@ -18,10 +37,12 @@
 #include <boost/beast/http/string_body.hpp>
 #include <boost/beast/http/verb.hpp>
 #include <boost/beast/http/write.hpp>
+#include <boost/mysql/connection_pool.hpp>
+#include <boost/mysql/results.hpp>
+#include <boost/mysql/with_params.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -36,6 +57,28 @@ namespace http = beast::http;
 namespace mysql = boost::mysql;
 using boost::system::error_code;
 
+namespace {
+
+// Helper function to log unhandled exceptions
+// when handling requests
+void log_exception(std::exception_ptr exc)
+{
+    try
+    {
+        std::rethrow_exception(exc);
+    }
+    catch (const std::exception& err)
+    {
+        std::cerr << "Unhandled exception: " << err.what() << std::endl;
+    }
+}
+
+// Validates an incoming HTTP request, extracting the employee ID that the client
+// is asking for. If the verb or target don't match what we expect,
+// returns an empty optional.
+// A more refined version could return a std::expected/boost::system::result
+// containing what went wrong, so we can return specialized responses
+// (e.g. http::verb::method_not_allowed if the method is not what we expected).
 std::optional<std::int64_t> parse_request(const http::request<http::empty_body>& req)
 {
     constexpr std::string_view prefix = "/employee/";
@@ -57,14 +100,21 @@ std::optional<std::int64_t> parse_request(const http::request<http::empty_body>&
     if (from_chars_res.ptr != target.end())
         return {};
 
+    // Done
     return res;
 }
 
+// Handles an individual HTTP request.
+// This function accesses the SQL database, performing async operations,
+// so it's a C++20 coroutine. Coroutines in Asio return asio::awaitable<T>,
+// where T is the type to co_return from the coroutine.
+// We will set a timeout to the entire coroutine (see the call site).
 asio::awaitable<http::response<http::string_body>> handle_request(
-    mysql::connection_pool& pool,
-    const http::request<http::empty_body>& req
+    mysql::connection_pool& pool,               // contains connections to the database
+    const http::request<http::empty_body>& req  // HTTP request
 )
 {
+    // The response to return
     http::response<http::string_body> res;
 
     try
@@ -73,16 +123,15 @@ asio::awaitable<http::response<http::string_body>> handle_request(
         std::optional<std::int64_t> employee_id = parse_request(req);
         if (!employee_id)
         {
-            res.result(http::status::bad_request);
+            res.result(http::status::bad_request);  // HTTP 400
             co_return res;
         }
 
-        // Get a connection from the pool
-        mysql::pooled_connection conn = co_await pool.async_get_connection(
-            asio::cancel_after(std::chrono::seconds(20))
-        );
+        // Get a connection to the database server from the pool.
+        // If no connection is available, this will wait one is ready.
+        mysql::pooled_connection conn = co_await pool.async_get_connection();
 
-        // Query the database
+        // Query the database using dynamic SQL
         mysql::results query_result;
         co_await conn->async_execute(
             mysql::with_params("SELECT last_name FROM employee WHERE id = {}", employee_id),
@@ -102,35 +151,74 @@ asio::awaitable<http::response<http::string_body>> handle_request(
     }
     catch (const std::exception& err)
     {
-        // TODO: log
-        res.result(http::status::bad_request);
+        // If any of the above operations encountered an error,
+        // an exception is thrown. This can happen if the server
+        // is unhealthy, the server returns an error when running the query,
+        // or the coroutine gets cancelled.
+        std::cerr << "Error while handling request: " << err.what() << std::endl;
+        res.result(http::status::internal_server_error);  // 500 error
         co_return res;
     }
 }
 
-static asio::awaitable<void> run_session(mysql::connection_pool& pool, asio::ip::tcp::socket sock)
+// Runs an individual HTTP session: reads a request,
+// processes it, and writes the response.
+asio::awaitable<void> run_session(mysql::connection_pool& pool, asio::ip::tcp::socket sock)
 {
     using namespace std::chrono_literals;
 
-    // Read a request
+    // Read a request. We say that http::async_read is an Asio composed operation:
+    // it calls asio::ip::tcp::socket::async_read_some() several times, until
+    // the entire HTTP request is read.
+    // The last argument to http::async_read() is the completion token:
+    // it specifies what to do when the async operation completes.
+    // If nothing is specified, Asio returns an object that can be co_await'ed.
+    // asio::cancel_after is a completion token that can be used to specify timeouts:
+    // if the operation does not complete in 60 seconds, a cancellation is issued,
+    // and the operation finishes with an error.
+    // By default, asio::cancel_after() also turns the operation into an awaitable.
     beast::flat_buffer buff;
     http::request<http::empty_body> req;
     co_await http::async_read(sock, buff, req, asio::cancel_after(60s));
 
-    // Handle it
+    // Handle the request. We want to limit the overall time taken by
+    // the request to 30 seconds.
+    // If we had written "co_await handle_request(pool, req)", we would
+    // have had no way to specify the timeout.
+    // In this sense, we can classify async operations in Asio into two types:
+    //    - co_await handle_request(pool, req) always uses C++20 coroutines.
+    //      These are easy to write, but less flexible.
+    //    - http::async_read(), asio::co_spawn() and other library functions
+    //      follow Asio's universal async model. That is, they can be passed
+    //      a completion token as last parameter. These are more difficult to
+    //      write, but are more flexible.
+    // asio::co_spawn() is actually an async operation, too, so we can co_await it.
+    // If the timeout elapses and handle_request hasn't finished, the async
+    // operation that handle_request() is waiting for will be cancelled.
+    // This makes it finish with an error (similar to when a network error occurs).
+    // Note that a cancellation does NOT make the coroutine to "just stop executing".
     http::response<http::string_body> res = co_await asio::co_spawn(
+        // Use the same executor as the parent coroutine.
+        // An executor represents a handle to an execution context (i.e. event loop)
         co_await asio::this_coro::executor,
+
+        // The coroutine to actually execute
         [&] { return handle_request(pool, req); },
+
+        // The completion token for the coroutine
         asio::cancel_after(30s)
     );
 
-    // Send the response
+    // Send the response, specifying a timeout.
+    // More complex versions could support HTTP keep alive, handling requests
+    // in a loop.
     res.version(req.version());
     res.keep_alive(false);
     res.prepare_payload();
     co_await http::async_write(sock, res, asio::cancel_after(60s));
 }
 
+// The main coroutine
 asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port)
 {
     // An object that allows us to accept incoming TCP connections.
@@ -159,18 +247,21 @@ asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port
         // Accept a connection
         auto sock = co_await acceptor.async_accept();
 
-        // Launch a session
+        // Launch a session.
+        // Don't co_await run_session: we want to keep accepting connections
+        // while a session is in progress.
+        // This time, we're passing a callback to co_spawn,
+        // which is a valid completion token, too.
+        // The callback will be called when the coroutine completes.
         asio::co_spawn(
             co_await asio::this_coro::executor,
             [socket = std::move(sock), &pool]() mutable { return run_session(pool, std::move(socket)); },
-            [](std::exception_ptr ex) {
-                // TODO: log instead of throw
-                if (ex)
-                    std::rethrow_exception(ex);
-            }
+            &log_exception
         );
     }
 }
+
+}  // namespace
 
 int main(int argc, char** argv)
 {
@@ -182,7 +273,9 @@ int main(int argc, char** argv)
     }
     auto port = static_cast<unsigned short>(std::stoi(argv[4]));
 
-    // Execution context
+    // Execution context. This is a heavyweight object
+    // containing all the required infrastructure to run async operations,
+    // including a scheduler, timer queues, file descriptors...
     asio::io_context ctx;
 
     // Launch the MySQL pool
@@ -192,7 +285,7 @@ int main(int argc, char** argv)
             .server_address = mysql::host_and_port(argv[3]),
             .username = argv[1],
             .password = argv[2],
-            .database = "boost_mysql_examples",
+            .database = "usingstdcpp",
         }
     );
     pool.async_run(asio::detached);

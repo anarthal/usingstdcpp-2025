@@ -256,7 +256,10 @@ asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port
         asio::co_spawn(
             co_await asio::this_coro::executor,
             [socket = std::move(sock), &pool]() mutable { return run_session(pool, std::move(socket)); },
-            &log_exception
+            [](std::exception_ptr exc) {
+                if (exc)
+                    log_exception(exc);
+            }
         );
     }
 }

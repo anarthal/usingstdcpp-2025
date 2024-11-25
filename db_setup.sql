@@ -42,3 +42,9 @@ INSERT INTO employee (first_name, last_name, salary, company_id) VALUES
     ("Coffee", "Drinker", 30000, "HGS"),
     ("Underpaid", "Intern", 15000, "AWC")
 ;
+
+-- User
+DROP USER IF EXISTS 'usingstdcpp'@'%';
+CREATE USER 'usingstdcpp'@'%' IDENTIFIED BY 'example_password';
+GRANT ALL PRIVILEGES ON usingstdcpp.* TO 'usingstdcpp'@'%';
+FLUSH PRIVILEGES;

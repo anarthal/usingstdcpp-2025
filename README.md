@@ -1,8 +1,7 @@
-# Boost.Asio: the universal async model
+# Cancellations in Asio: a tale of coroutines and timeouts
 
-This repository contains the [slides](slides.pdf) and all the code samples
-for the "Boost.Asio: the universal async model" talk in the
-[using std::cpp 2024](https://usingstdcpp.org/) conference.
+This repository contains some code sketches for
+the "Cancellations in Asio: a tale of coroutines and timeouts" talk
+proposal for the [using std::cpp 2025](https://usingstdcpp.org/) conference.
 
-If you have any question or are otherwise interested in Boost.Asio,
-please [join us in Slack](https://cpplang.slack.com/archives/C06BRML5EFK)!
+Code in this repository is still a work in progress.

@@ -4,6 +4,7 @@
 #include <boost/mysql/with_params.hpp>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancel_after.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -20,6 +21,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -58,34 +60,6 @@ std::optional<std::int64_t> parse_request(const http::request<http::empty_body>&
     return res;
 }
 
-asio::awaitable<std::optional<std::string>> get_company(
-    mysql::connection_pool& pool,
-    std::int64_t employee_id
-)
-{
-    // Get a connection from the pool
-    mysql::pooled_connection conn = co_await pool.async_get_connection(
-        asio::cancel_after(std::chrono::seconds(20))
-    );
-
-    // Query the database
-    mysql::results result;
-    co_await conn->async_execute(
-        mysql::with_params("SELECT company_id FROM employee WHERE id = {}", employee_id),
-        result
-    );
-
-    // Compose the message to be sent back to the client
-    if (result.rows().empty())
-    {
-        co_return std::nullopt;
-    }
-    else
-    {
-        co_return result.rows().at(0).at(0).as_string();
-    }
-}
-
 asio::awaitable<http::response<http::string_body>> handle_request(
     mysql::connection_pool& pool,
     const http::request<http::empty_body>& req
@@ -93,42 +67,68 @@ asio::awaitable<http::response<http::string_body>> handle_request(
 {
     http::response<http::string_body> res;
 
-    // Parse the request
-    std::optional<std::int64_t> employee_id = parse_request(req);
-    if (!employee_id)
+    try
     {
+        // Parse the request
+        std::optional<std::int64_t> employee_id = parse_request(req);
+        if (!employee_id)
+        {
+            res.result(http::status::bad_request);
+            co_return res;
+        }
+
+        // Get a connection from the pool
+        mysql::pooled_connection conn = co_await pool.async_get_connection(
+            asio::cancel_after(std::chrono::seconds(20))
+        );
+
+        // Query the database
+        mysql::results query_result;
+        co_await conn->async_execute(
+            mysql::with_params("SELECT last_name FROM employee WHERE id = {}", employee_id),
+            query_result
+        );
+
+        // If the query didn't get any row back, return a 404
+        if (query_result.rows().empty())
+        {
+            res.result(http::status::not_found);
+            co_return res;
+        }
+
+        // Return the response
+        res.body() = query_result.rows().at(0).at(0).as_string();
+        co_return res;
+    }
+    catch (const std::exception& err)
+    {
+        // TODO: log
         res.result(http::status::bad_request);
         co_return res;
     }
-
-    // Query the database
-    std::optional<std::string> company_name = co_await get_company(pool, *employee_id);
-    if (!company_name)
-    {
-        res.result(http::status::not_found);
-        co_return res;
-    }
-
-    // Compose the response
-    res.body() = *company_name;
-    co_return res;
 }
 
 static asio::awaitable<void> run_session(mysql::connection_pool& pool, asio::ip::tcp::socket sock)
 {
+    using namespace std::chrono_literals;
+
     // Read a request
     beast::flat_buffer buff;
     http::request<http::empty_body> req;
-    co_await http::async_read(sock, buff, req);
+    co_await http::async_read(sock, buff, req, asio::cancel_after(60s));
 
     // Handle it
-    http::response<http::string_body> res = co_await handle_request(pool, req);
+    http::response<http::string_body> res = co_await asio::co_spawn(
+        co_await asio::this_coro::executor,
+        [&] { return handle_request(pool, req); },
+        asio::cancel_after(30s)
+    );
 
     // Send the response
     res.version(req.version());
     res.keep_alive(false);
     res.prepare_payload();
-    co_await http::async_write(sock, res);
+    co_await http::async_write(sock, res, asio::cancel_after(60s));
 }
 
 asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port)
@@ -163,9 +163,8 @@ asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port
         asio::co_spawn(
             co_await asio::this_coro::executor,
             [socket = std::move(sock), &pool]() mutable { return run_session(pool, std::move(socket)); },
-
-            // TODO: change this by a logger
             [](std::exception_ptr ex) {
+                // TODO: log instead of throw
                 if (ex)
                     std::rethrow_exception(ex);
             }

@@ -1,5 +1,7 @@
 
 #include <boost/mysql/connection_pool.hpp>
+#include <boost/mysql/results.hpp>
+#include <boost/mysql/with_params.hpp>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -8,17 +10,23 @@
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/http/empty_body.hpp>
 #include <boost/beast/http/message.hpp>
 #include <boost/beast/http/read.hpp>
+#include <boost/beast/http/status.hpp>
 #include <boost/beast/http/string_body.hpp>
+#include <boost/beast/http/verb.hpp>
 #include <boost/beast/http/write.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <charconv>
 #include <cstdint>
 #include <exception>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -26,41 +34,100 @@ namespace http = beast::http;
 namespace mysql = boost::mysql;
 using boost::system::error_code;
 
-std::int64_t parse_request(const http::request<http::string_body>& req)
+std::optional<std::int64_t> parse_request(const http::request<http::empty_body>& req)
 {
-    // TODO
-    return 0;
+    constexpr std::string_view prefix = "/employees/";
+
+    // Check the verb
+    if (req.method() != http::verb::get)
+        return {};
+
+    // Check that the target starts with the prefix
+    auto target = req.target();
+    if (!target.starts_with(prefix))
+        return {};
+
+    // Attempt to parse the ID following the prefix
+    std::int64_t res{};
+    auto from_chars_res = std::from_chars(target.begin() + prefix.size(), target.end(), res);
+    if (from_chars_res.ec != std::errc{})
+        return {};
+    if (from_chars_res.ptr != target.end())
+        return {};
+
+    return res;
 }
 
-asio::awaitable<std::optional<std::string>> get_company(std::int64_t employee_id)
+asio::awaitable<std::optional<std::string>> get_company(
+    mysql::connection_pool& pool,
+    std::int64_t employee_id
+)
 {
-    // TODO
-    co_return "";
+    // Get a connection from the pool
+    mysql::pooled_connection conn = co_await pool.async_get_connection(
+        asio::cancel_after(std::chrono::seconds(20))
+    );
+
+    // Query the database
+    mysql::results result;
+    co_await conn->async_execute(
+        mysql::with_params("SELECT company_id FROM employee WHERE id = {}", employee_id),
+        result
+    );
+
+    // Compose the message to be sent back to the client
+    if (result.rows().empty())
+    {
+        co_return std::nullopt;
+    }
+    else
+    {
+        co_return result.rows().at(0).at(0).as_string();
+    }
 }
 
-http::response<http::string_body> compose_response(const std::optional<std::string>& company)
+asio::awaitable<http::response<http::string_body>> handle_request(
+    mysql::connection_pool& pool,
+    const http::request<http::empty_body>& req
+)
 {
-    // TODO
-    return {};
+    http::response<http::string_body> res;
+
+    // Parse the request
+    std::optional<std::int64_t> employee_id = parse_request(req);
+    if (!employee_id)
+    {
+        res.result(http::status::bad_request);
+        co_return res;
+    }
+
+    // Query the database
+    std::optional<std::string> company_name = co_await get_company(pool, *employee_id);
+    if (!company_name)
+    {
+        res.result(http::status::not_found);
+        co_return res;
+    }
+
+    // Compose the response
+    res.body() = *company_name;
+    co_return res;
 }
 
-static asio::awaitable<void> run_session(asio::ip::tcp::socket sock, mysql::connection_pool& pool)
+static asio::awaitable<void> run_session(mysql::connection_pool& pool, asio::ip::tcp::socket sock)
 {
     // Read a request
     beast::flat_buffer buff;
-    http::request<http::string_body> req;
+    http::request<http::empty_body> req;
     co_await http::async_read(sock, buff, req);
 
-    // Parse the request
-    std::int64_t employee_id = parse_request(req);
-
-    // Query the database
-    std::optional<std::string> company_name = co_await get_company(employee_id);
-
-    // Compose the response
-    http::response<http::string_body> res = compose_response(company_name);
+    // Handle it
+    http::response<http::string_body> res = co_await handle_request(pool, req);
 
     // Send the response
+    res.version(req.version());
+    res.keep_alive(false);
+    res.prepare_payload();
     co_await http::async_write(sock, res);
 }
 
@@ -95,7 +162,7 @@ asio::awaitable<void> listener(mysql::connection_pool& pool, unsigned short port
         // Launch a session
         asio::co_spawn(
             co_await asio::this_coro::executor,
-            [socket = std::move(sock), &pool]() mutable { return run_session(std::move(socket), pool); },
+            [socket = std::move(sock), &pool]() mutable { return run_session(pool, std::move(socket)); },
 
             // TODO: change this by a logger
             [](std::exception_ptr ex) {

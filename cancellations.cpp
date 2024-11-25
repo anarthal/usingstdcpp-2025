@@ -36,7 +36,7 @@ using boost::system::error_code;
 
 std::optional<std::int64_t> parse_request(const http::request<http::empty_body>& req)
 {
-    constexpr std::string_view prefix = "/employees/";
+    constexpr std::string_view prefix = "/employee/";
 
     // Check the verb
     if (req.method() != http::verb::get)

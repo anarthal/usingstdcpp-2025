@@ -9,42 +9,26 @@
 SET NAMES utf8;
 
 -- Database
-DROP DATABASE IF EXISTS usingstdcpp;
-CREATE DATABASE usingstdcpp;
-USE usingstdcpp;
+DROP DATABASE IF EXISTS correlations;
+CREATE DATABASE correlations;
+USE correlations;
 
 -- Tables
-CREATE TABLE company(
-    id CHAR(10) NOT NULL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    tax_id VARCHAR(50) NOT NULL
-);
-CREATE TABLE employee(
-    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    last_name VARCHAR(100) NOT NULL,
-    salary INT UNSIGNED,
-    company_id CHAR(10) NOT NULL,
-    FOREIGN KEY (company_id) REFERENCES company(id)
+CREATE TABLE correlations(
+    id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+    subject VARCHAR(200) NOT NULL
 );
 
 -- Sample values
-INSERT INTO company (name, id, tax_id) VALUES
-    ("Award Winning Company, Inc.", "AWC", "IE1234567V"),
-    ("Sector Global Leader Plc", "SGL", "IE1234568V"),
-    ("High Growth Startup, Ltd", "HGS", "IE1234569V")
-;
-INSERT INTO employee (first_name, last_name, salary, company_id) VALUES
-    ("Efficient", "Developer", 30000, "AWC"),
-    ("Lazy", "Manager", 80000, "AWC"),
-    ("Good", "Team Player", 35000, "HGS"),
-    ("Enormous", "Slacker", 45000, "SGL"),
-    ("Coffee", "Drinker", 30000, "HGS"),
-    ("Underpaid", "Intern", 15000, "AWC")
+-- See https://www.tylervigen.com/spurious-correlations
+INSERT INTO correlations (subject) VALUES
+    ("Wind power generated in Taiwan vs. Google searches for 'I am tired'"),
+    ("Pirate attacks globally vs. Google searches for 'download firefox'"),
+    ("Per capita consumption of margarine vs. The divorce rate in Spain")
 ;
 
 -- User
-DROP USER IF EXISTS 'usingstdcpp'@'%';
-CREATE USER 'usingstdcpp'@'%' IDENTIFIED BY 'example_password';
-GRANT ALL PRIVILEGES ON usingstdcpp.* TO 'usingstdcpp'@'%';
+DROP USER IF EXISTS 'me'@'%';
+CREATE USER 'me'@'%' IDENTIFIED BY 'secret';
+GRANT ALL PRIVILEGES ON correlations.* TO 'me'@'%';
 FLUSH PRIVILEGES;

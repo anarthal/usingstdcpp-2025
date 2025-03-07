@@ -2,7 +2,8 @@
 cmake_minimum_required(VERSION 3.15.0)
 project(usingstdcpp_2025)
 
-find_package(Boost REQUIRED COMPONENTS headers charconv)
+find_package(boost_headers REQUIRED)
+find_package(boost_charconv REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 function(add_example EXE)
@@ -11,4 +12,4 @@ function(add_example EXE)
     target_compile_features(${EXE} PRIVATE cxx_std_20)
 endfunction()
 
-add_example(cancellations)
+add_example(1_sync)

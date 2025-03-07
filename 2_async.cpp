@@ -99,7 +99,7 @@ asio::awaitable<void> run_server()
     while (true)
     {
         // Accept a connection
-        asio::ip::tcp::socket sock = acceptor.accept();
+        asio::ip::tcp::socket sock = co_await acceptor.async_accept();
 
         // Launch a session.
         co_await run_session(sock);

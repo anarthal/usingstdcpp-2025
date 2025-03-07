@@ -13,3 +13,5 @@ function(add_example EXE)
 endfunction()
 
 add_example(1_sync)
+add_example(2_async)
+add_example(3_parallel_requests)

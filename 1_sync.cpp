@@ -57,17 +57,22 @@ void run_session(asio::ip::tcp::socket& sock)
     http::read(sock, buff, req);
     std::uint64_t id = parse_id(req.target());
 
-    // Handle the request
+    // Query the database
     mysql::any_connection conn(sock.get_executor());
-    conn.connect(mysql::connect_params{.username = "me", .password = "secret", .database = "correlations"});
+    conn.connect({.username = "me", .password = "secret", .database = "correlations"});
 
     mysql::results r;
     conn.execute(mysql::with_params("SELECT subject FROM correlations WHERE id = {}", id), r);
-    std::string_view name = r.rows().at(0).at(0).as_string();
 
-    // Return the response
-    http::response<http::string_body> res(http::status::ok, req.version());
-    res.body() = name;
+    // Compose the response
+    http::response<http::string_body> res;
+    if (r.rows().empty())
+        res.result(http::status::not_found);
+    else
+        res.body() = r.rows().at(0).at(0).as_string();
+
+    // Write the response back
+    res.version(req.version());
     res.keep_alive(false);
     res.prepare_payload();
     http::write(sock, res);

@@ -107,15 +107,11 @@ asio::awaitable<void> run_session(asio::ip::tcp::socket sock)
 
 asio::awaitable<void> run_server()
 {
-    // An object that allows us to accept incoming TCP connections.
+    // Set up an object listening for TCP connections in port 8080
     asio::ip::tcp::acceptor acceptor(co_await asio::this_coro::executor);
-
-    // The endpoint where the server will listen. Edit this if you want to
-    // change the address or port we bind to.
-    asio::ip::tcp::endpoint listening_endpoint(asio::ip::make_address("0.0.0.0"), 8080);
-    acceptor.open(listening_endpoint.protocol());
+    acceptor.open(asio::ip::tcp::v4());
     acceptor.set_option(asio::socket_base::reuse_address(true));
-    acceptor.bind(listening_endpoint);
+    acceptor.bind({asio::ip::make_address("0.0.0.0"), 8080});
     acceptor.listen();
 
     // Accept connections in a loop
